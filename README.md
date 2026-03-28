@@ -15,9 +15,11 @@ BimRoss is a single-person LLC building operator-first systems across Bittensor,
 
 ## Start Here
 
-- [bimross.com](https://bimross.com)
+- [bimross.com](https://bimross.com) for the public company surface
 - pinned repositories below on this profile
 - [grantfoster.dev](https://grantfoster.dev) for the founder behind the company
+
+If you want the founder lens, how the company thinks, and why it is built this way, start with **Grant Foster**.
 
 ## Operating Style
 
@@ -31,6 +33,8 @@ BimRoss is a single-person LLC building operator-first systems across Bittensor,
 We believe a very small, highly capable company with the right software and AI leverage can outperform much larger teams.
 
 BimRoss is built around that belief.
+
+This profile is the company layer: products, infrastructure, proof, and operating style.
 
 ## Connect
 
