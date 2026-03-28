@@ -1,4 +1,4 @@
-# BimRoss
+# BimRoss, LLC
 
 On a mission to become the first trillion-dollar, single-person LLC
 
