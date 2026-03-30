@@ -1,5 +1,5 @@
 # BimRoss, LLC
 
-On a mission to become the first trillion-dollar, single-person LLC
+Building the first trillion-dollar, single-person LLC with AI
 
 https://bimross.com
