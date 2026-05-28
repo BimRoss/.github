@@ -1,0 +1,239 @@
+name: GitOps Release (BimRoss canonical)
+
+# Canonical workflow that takes a published image version, patches the
+# relevant manifests in rancher-admin, and opens a PR on master. Replaces
+# the per-repo inline gitops-release jobs we used to copy-paste across
+# claude-code-ross, claude-code-joanne, makeacompany-ai, job-tracker,
+# and grantfoster.dev — see RELEASING.md for the full recipe and the
+# migration history.
+#
+# Callers retain image build + tag/dispatch routing. This workflow takes
+# over: sanitize + validate version, verify the tag exists on Docker
+# Hub, patch manifests, open the rancher-admin PR, best-effort
+# auto-merge. Pin via `@v1` (movable major) or a SHA for hotfixes.
+
+on:
+  workflow_call:
+    inputs:
+      app_slug:
+        description: "Application slug (e.g. claude-code-ross). Used in branch name, commit author, and PR body."
+        required: true
+        type: string
+      version:
+        description: "Bare semver (e.g. 0.1.79). A leading 'v' is stripped defensively, but callers should pass it pre-cleaned."
+        required: true
+        type: string
+      target_env:
+        description: "Optional environment infix ('dev', 'prod', or empty). When set, branch becomes gitops/<slug>-<target_env>-<version>."
+        required: false
+        type: string
+        default: ""
+      images:
+        description: "Newline-separated list of fully-qualified Docker Hub images (e.g. geeemoney/claude-code-ross). Each is verified to have <version> on Docker Hub before any rancher-admin work happens."
+        required: true
+        type: string
+      manifest_paths:
+        description: "Newline-separated list of rancher-admin manifest paths to patch (relative to repo root, e.g. admin/apps/claude-code-ross/deployment.yaml)."
+        required: true
+        type: string
+      commit_subject:
+        description: "Subject line for both the commit and the PR title (e.g. 'release(claude-code-ross): promote prod to 0.1.79')."
+        required: true
+        type: string
+    outputs:
+      pr_number:
+        description: "Number of the opened/updated rancher-admin PR. Empty if no manifest changes."
+        value: ${{ jobs.release.outputs.pr_number }}
+      pr_url:
+        description: "URL of the opened/updated rancher-admin PR."
+        value: ${{ jobs.release.outputs.pr_url }}
+    secrets:
+      RANCHER_ADMIN_REPO_TOKEN:
+        description: "PAT with contents:write + pull-requests:write on bimross/rancher-admin. Available as an org secret to all BimRoss repos."
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RANCHER_ADMIN_REPO: bimross/rancher-admin
+    outputs:
+      pr_number: ${{ steps.pr.outputs.number }}
+      pr_url: ${{ steps.pr.outputs.url }}
+    steps:
+      - name: Sanitize and validate version
+        id: ver
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          VERSION="${VERSION_INPUT#v}"
+          if ! echo "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION '${VERSION}' is not bare semver (expected NN.NN.NN)"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Sanitized version: ${VERSION}"
+
+      - name: Verify image tags exist on Docker Hub
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          IMAGES: ${{ inputs.images }}
+        run: |
+          # The caller's build job is wired via `needs:`, which only proves
+          # the job exited 0. It does NOT prove the registry has the tag.
+          # Transient push failures and operator typos can both produce
+          # that gap (see rancher-admin#367 for the operator-typo case and
+          # rancher-admin commit 32407c1 for the silent-push-failure case).
+          # Hard-fail here so the broken state never reaches Fleet.
+          missing=0
+          while IFS= read -r image; do
+            image="$(echo "${image}" | xargs)"
+            [ -z "${image}" ] && continue
+            url="https://hub.docker.com/v2/repositories/${image}/tags/${VERSION}"
+            status=$(curl -s -o /dev/null -w '%{http_code}' "${url}")
+            if [ "${status}" != "200" ]; then
+              echo "::error::Tag ${VERSION} not found for ${image} (HTTP ${status})"
+              missing=$((missing + 1))
+            else
+              echo "Verified: ${image}:${VERSION}"
+            fi
+          done <<<"${IMAGES}"
+          if [ "${missing}" -gt 0 ]; then
+            echo "::error::${missing} image(s) missing on Docker Hub. Refusing to open rancher-admin PR."
+            exit 1
+          fi
+
+      - name: Checkout rancher-admin
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.RANCHER_ADMIN_REPO }}
+          ref: master
+          token: ${{ secrets.RANCHER_ADMIN_REPO_TOKEN }}
+          path: rancher-admin
+          fetch-depth: 0
+
+      - name: Patch manifests
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          IMAGES: ${{ inputs.images }}
+          MANIFEST_PATHS: ${{ inputs.manifest_paths }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          version = os.environ["VERSION"]
+          images = [s.strip() for s in os.environ["IMAGES"].splitlines() if s.strip()]
+          paths = [s.strip() for s in os.environ["MANIFEST_PATHS"].splitlines() if s.strip()]
+          # One regex per image, anchored on the literal name so we never
+          # touch a sibling image that shares a prefix (e.g. job-tracker-api
+          # vs. job-tracker-web both contain 'job-tracker').
+          patterns = [(img, re.compile(re.escape(img) + r":[^\s\"'`]+")) for img in images]
+          for p in paths:
+              full = Path("rancher-admin") / p
+              if not full.is_file():
+                  print(f"skip: {full} does not exist")
+                  continue
+              text = full.read_text()
+              new = text
+              for img, pat in patterns:
+                  new = pat.sub(f"{img}:{version}", new)
+              if new != text:
+                  full.write_text(new)
+                  print(f"patched: {full}")
+              else:
+                  print(f"no change: {full}")
+          PY
+
+      - name: Commit and push branch
+        id: commit
+        working-directory: rancher-admin
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TARGET_ENV: ${{ inputs.target_env }}
+          APP_SLUG: ${{ inputs.app_slug }}
+          COMMIT_SUBJECT: ${{ inputs.commit_subject }}
+        run: |
+          if git diff --quiet; then
+            echo "No manifest changes to commit."
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git config user.name "${APP_SLUG}-ci"
+          git config user.email "${APP_SLUG}-ci@users.noreply.github.com"
+          if [ -n "${TARGET_ENV}" ]; then
+            BRANCH="gitops/${APP_SLUG}-${TARGET_ENV}-${VERSION}"
+          else
+            BRANCH="gitops/${APP_SLUG}-${VERSION}"
+          fi
+          # Idempotent branch: re-runs for the same version force-push the
+          # same branch, so the PR always reflects the latest manifest.
+          # Branch name embeds version, so collisions only happen on
+          # workflow reruns for the same release.
+          git checkout -B "${BRANCH}"
+          git add -A
+          git commit -m "${COMMIT_SUBJECT}"
+          git push --force-with-lease origin "${BRANCH}"
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+          echo "branch=${BRANCH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Open or update PR
+        id: pr
+        if: steps.commit.outputs.changed == 'true'
+        working-directory: rancher-admin
+        env:
+          GH_TOKEN: ${{ secrets.RANCHER_ADMIN_REPO_TOKEN }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          TITLE: ${{ inputs.commit_subject }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TARGET_ENV: ${{ inputs.target_env }}
+          IMAGES: ${{ inputs.images }}
+          SOURCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Build the canonical PR body once into a file. Every BimRoss
+          # release PR looks the same shape so reviewers and Ross can
+          # pattern-match on it.
+          {
+            echo "Automated GitOps bump from \`${GITHUB_REPOSITORY}\` via the BimRoss canonical \`gitops-release\` reusable workflow."
+            echo
+            if [ -n "${TARGET_ENV}" ]; then
+              echo "- target: \`${TARGET_ENV}\`"
+            fi
+            echo "- version: \`${VERSION}\`"
+            while IFS= read -r image; do
+              image="$(echo "${image}" | xargs)"
+              [ -z "${image}" ] && continue
+              echo "- image: \`${image}:${VERSION}\`"
+            done <<<"${IMAGES}"
+            echo "- source run: ${SOURCE_RUN_URL}"
+            echo
+            echo "Org ruleset on \`master\` requires PR review."
+            echo "Auto-merge (squash) is enabled best-effort; PR will merge once required checks + approvals land. If auto-merge doesn't take, \`gh pr merge --admin --squash\` is the documented fallback."
+          } > /tmp/pr-body.md
+
+          EXISTING=$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number' || true)
+          if [ -n "${EXISTING}" ]; then
+            echo "Reusing existing PR #${EXISTING}."
+            PR_NUMBER="${EXISTING}"
+            gh pr edit "${PR_NUMBER}" --title "${TITLE}" --body-file /tmp/pr-body.md || true
+          else
+            gh pr create \
+              --title "${TITLE}" \
+              --body-file /tmp/pr-body.md \
+              --base master \
+              --head "${BRANCH}"
+            PR_NUMBER=$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[0].number')
+            echo "Opened PR #${PR_NUMBER}."
+          fi
+
+          PR_URL="${GITHUB_SERVER_URL}/${RANCHER_ADMIN_REPO}/pull/${PR_NUMBER}"
+          echo "number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+          echo "url=${PR_URL}" >> "${GITHUB_OUTPUT}"
+
+          # Best-effort auto-merge. Documented as flaky regardless of dev/prod
+          # or repo (see MEMORY.md feedback_gitops_release_workflow — both
+          # auto-merge race AND self-approval block are real). Never fail the
+          # job on this — the PR is the deliverable.
+          gh pr merge "${PR_NUMBER}" --auto --squash --delete-branch || \
+            echo "::warning::Could not enable auto-merge on PR #${PR_NUMBER}. Fall back: gh pr merge ${PR_NUMBER} --admin --squash --delete-branch"
