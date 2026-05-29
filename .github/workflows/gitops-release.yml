@@ -51,6 +51,12 @@ on:
       RANCHER_ADMIN_REPO_TOKEN:
         description: "PAT with contents:write + pull-requests:write on bimross/rancher-admin. Available as an org secret to all BimRoss repos."
         required: true
+      DOCKERHUB_USERNAME:
+        description: "Docker Hub username for authenticating tag verification against private repos. Optional — unauthenticated check is used when absent (public repos only)."
+        required: false
+      DOCKERHUB_TOKEN:
+        description: "Docker Hub access token paired with DOCKERHUB_USERNAME. Optional — same caveat as above."
+        required: false
 
 jobs:
   release:
@@ -78,6 +84,8 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           IMAGES: ${{ inputs.images }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           # The caller's build job is wired via `needs:`, which only proves
           # the job exited 0. It does NOT prove the registry has the tag.
@@ -85,12 +93,34 @@ jobs:
           # that gap (see rancher-admin#367 for the operator-typo case and
           # rancher-admin commit 32407c1 for the silent-push-failure case).
           # Hard-fail here so the broken state never reaches Fleet.
+          #
+          # Authenticate when credentials are available so private repos are
+          # reachable. Falls back to unauthenticated for public-only setups.
+          AUTH_HEADER=""
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            HUB_JWT=$(curl -s -X POST "https://hub.docker.com/v2/users/login" \
+              -H "Content-Type: application/json" \
+              -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('token',''))")
+            if [ -n "${HUB_JWT}" ]; then
+              AUTH_HEADER="Authorization: Bearer ${HUB_JWT}"
+              echo "Authenticated to Docker Hub as ${DOCKERHUB_USERNAME}."
+            else
+              echo "::warning::Docker Hub login returned no token — falling back to unauthenticated check (private repos will 404)."
+            fi
+          else
+            echo "No Docker Hub credentials supplied — using unauthenticated check (public repos only)."
+          fi
           missing=0
           while IFS= read -r image; do
             image="$(echo "${image}" | xargs)"
             [ -z "${image}" ] && continue
             url="https://hub.docker.com/v2/repositories/${image}/tags/${VERSION}"
-            status=$(curl -s -o /dev/null -w '%{http_code}' "${url}")
+            if [ -n "${AUTH_HEADER}" ]; then
+              status=$(curl -s -o /dev/null -w '%{http_code}' -H "${AUTH_HEADER}" "${url}")
+            else
+              status=$(curl -s -o /dev/null -w '%{http_code}' "${url}")
+            fi
             if [ "${status}" != "200" ]; then
               echo "::error::Tag ${VERSION} not found for ${image} (HTTP ${status})"
               missing=$((missing + 1))
