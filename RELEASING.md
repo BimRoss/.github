@@ -48,6 +48,7 @@ Pin via `@v1` (movable major). For a hotfix in flight, pin a SHA temporarily.
 | `makeacompany-ai` | single | `geeemoney/makeacompany-ai-frontend`, `geeemoney/makeacompany-ai-backend` | `admin/apps/makeacompany-ai/{frontend,backend}.yaml` |
 | `job-tracker` | single | `geeemoney/job-tracker-api`, `geeemoney/job-tracker-web` | `admin/apps/job-tracker/{api,web}.yaml` |
 | `grantfoster.dev` | single | `geeemoney/grantfoster-website` | `admin/apps/grantfoster-website/deployment.yaml` |
+| `dating-venue` | single | `geeemoney/dating-venue` | `admin/apps/dating-venue/deployment.yaml` |
 
 ## How to ship — dev/prod split (ross, joanne)
 
