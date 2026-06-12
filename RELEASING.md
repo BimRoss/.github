@@ -6,11 +6,27 @@ If something in this doc conflicts with what you find in a repo, **this doc wins
 
 ## The mental model
 
-1. App repos build container images and push to Docker Hub on tag pushes.
+1. App repos build container images and push to a container registry on tag pushes.
 2. App repos also open a PR on `bimross/rancher-admin` that bumps the relevant `admin/apps/<app>/*.yaml` to point at the new image tag.
 3. Rancher Fleet watches `rancher-admin/master`. When that PR merges, Fleet rolls the cluster.
 
 So the path from "code merged" to "env deployed" is **two PRs in two repos**, not one. Skipping the second step means the image is published but no env picks it up.
+
+## Registry: `ghcr.io/bimross/<name>` for new projects
+
+New BimRoss apps default to **GitHub Container Registry** (`ghcr.io/bimross/<name>`), not Docker Hub (`geeemoney/<name>`). The Docker Hub path still works for the existing apps in the table below and won't be turned off, but new repos should not pick it up.
+
+Why:
+
+- **No org-wide token to hand out.** GitHub Actions authenticates to ghcr with the workflow's built-in `GITHUB_TOKEN`. There's no `DOCKERHUB_TOKEN` analog to share with an external collaborator who wants to ship into our cluster. Each repo's permission is implicitly scoped to itself.
+- **Public packages pull anonymously.** No cluster-side pull-secret needed. The reflector regex-allowlist mess that bit us on the `geeemoney/*` side (see `BimRoss/makeacompany-ai#355`) does not apply.
+- **Already proven.** `ghcr.io/bimross/brandlete-hubspot` and `ghcr.io/bimross/slack-gateway` already ship from GH Actions.
+
+Default new repos to **public** unless the operator asks otherwise. A private ghcr package needs a cluster pull-secret, which reintroduces the reflector problem in a new flavor.
+
+Existing apps stay on `geeemoney/` for now. Migration of any one of them is opt-in per repo, not blocked here.
+
+Tracking ticket for the full rollout (workflow-side support for the `ghcr.io/` prefix in the verify step, harness scaffold update, GitHub App replacement for the rancher-admin PAT): `BimRoss/makeacompany-ai#361`.
 
 ## The canonical workflow
 
@@ -28,8 +44,9 @@ gitops-release:
     version: <bare semver, no v>
     target_env: ""           # or "dev" / "prod" for the ross/joanne split
     images: |
-      geeemoney/<image-one>
-      geeemoney/<image-two>  # if applicable
+      ghcr.io/bimross/<image-one>     # new projects — see "Registry" above
+      ghcr.io/bimross/<image-two>     # if applicable
+      # geeemoney/<image>             # existing apps that haven't migrated
     manifest_paths: |
       admin/apps/<app>/<file>.yaml
     commit_subject: "release(<app>): bump to <version>"
