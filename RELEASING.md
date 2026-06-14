@@ -26,7 +26,7 @@ gitops-release:
   with:
     app_slug: <repo-slug>
     version: <bare semver, no v>
-    target_env: ""           # or "dev" / "prod" for the ross/joanne split
+    target_env: "prod"       # all five active repos are single-env (prod)
     images: |
       geeemoney/<image-one>
       geeemoney/<image-two>  # if applicable
@@ -43,45 +43,26 @@ Pin via `@v1` (movable major). For a hotfix in flight, pin a SHA temporarily.
 
 | Repo | Envs | Image(s) | Manifest path(s) |
 |---|---|---|---|
-| `claude-code-ross` | dev + prod | `geeemoney/claude-code-ross` | `admin/apps/claude-code-ross{,-prod}/deployment.yaml` |
-| `claude-code-joanne` | dev + prod | `geeemoney/claude-code-joanne` | `admin/apps/claude-code-joanne{,-prod}/deployment.yaml` |
+| `claude-code-ross` | single | `geeemoney/claude-code-ross` | `admin/apps/claude-code-ross-prod/deployment.yaml` |
+| `claude-code-joanne` | single | `geeemoney/claude-code-joanne` | `admin/apps/claude-code-joanne-prod/deployment.yaml` |
 | `makeacompany-ai` | single | `geeemoney/makeacompany-ai-frontend`, `geeemoney/makeacompany-ai-backend` | `admin/apps/makeacompany-ai/{frontend,backend}.yaml` |
 | `job-tracker` | single | `geeemoney/job-tracker-api`, `geeemoney/job-tracker-web` | `admin/apps/job-tracker/{api,web}.yaml` |
 | `grantfoster.dev` | single | `geeemoney/grantfoster-website` | `admin/apps/grantfoster-website/deployment.yaml` |
 | `dating-venue` | single | `geeemoney/dating-venue` | `admin/apps/dating-venue/deployment.yaml` |
 
-## How to ship — dev/prod split (ross, joanne)
+`claude-code-{ross,joanne}` collapsed dev → single-env on 2026-06-09 (ross#326, joanne#176): dev was duplicating prod with no human users, so the dev rancher-admin bundles + dev namespaces were deleted and tag pushes now write straight to `-prod`. No more `workflow_dispatch promote_to_prod` — the input is gone from both repos.
 
-### Bump dev
+## How to ship — single-env (all five repos)
 
 1. Merge code PR to repo `main`.
 2. Tag: `git tag -a v0.X.Y -m "<summary>" && git push origin v0.X.Y`
-3. CI builds the image and opens an auto-PR on `rancher-admin` titled `release(<app>): bump dev to 0.X.Y`.
+3. CI builds image(s) and opens an auto-PR on `rancher-admin` titled `release(<app>): bump prod to 0.X.Y`.
 4. Merge that PR (`gh pr merge --squash --delete-branch`; if blocked by approvals, `--admin --squash`).
 5. Fleet syncs within ~30s; Recreate rollout takes ~90s of Slack-quiet time. Wait it out before declaring success.
 
-### Promote dev → prod
+The tag is the release — there is no separate dev step and no `promote_to_prod` dispatch on any of the five repos. If you see a workflow file with a `promote_to_prod` input, it's pre-2026-06-09 and stale.
 
-1. Confirm `v0.X.Y` already shipped to dev and behaves.
-2. Trigger the dispatch:
-   ```bash
-   gh workflow run <app>-images.yml \
-     --repo BimRoss/<app> \
-     -f promote_to_prod=0.X.Y       # bare semver, NO v prefix
-   ```
-3. Merge the auto-PR on rancher-admin (same merge dance as above).
-4. Fleet rolls prod (~90s outage). Confirm with `kubectl -n <app>-prod get pods`.
-
-**Critical:** `promote_to_prod` is **bare semver**. The reusable workflow strips a leading `v` defensively, but the convention is "no v in the input." Typing `v0.X.Y` historically produced `ImagePullBackOff` (see rancher-admin#367 / claude-code-ross#209).
-
-## How to ship — single-env (makeacompany-ai, job-tracker, grantfoster.dev)
-
-1. Merge code PR to repo main.
-2. Tag: `git tag -a v0.X.Y -m "..." && git push origin v0.X.Y`
-3. CI builds image(s) and opens auto-PR on rancher-admin.
-4. Merge it. Fleet rolls prod.
-
-There is no separate "promote to prod" step — the tag is the release.
+**Race safety:** before tagging, `git fetch origin && git log origin/main..main` should be empty. Multiple Warp/Slack Claudes can each fire a tag push; tag uniqueness saves the second one but a stale local main would tag the wrong commit. The reusable workflow has a concurrency block that serializes the rancher-admin PR step even if two builds race.
 
 ## Verification
 
@@ -135,9 +116,9 @@ Don't re-arm `--auto` from your own shell — same self-approval block, silently
 - **Don't `git push` directly to `rancher-admin/master`.** Branch protection rejects it. Always PR.
 - **Don't `kubectl edit` deployments in admin clusters.** Fleet reverts within ~30s.
 - **Don't `--no-verify` past failing hooks.** Investigate the failure.
-- **Don't type `v0.X.Y` into the `promote_to_prod` workflow_dispatch input.** Bare semver.
+- **Don't look for a `promote_to_prod` workflow_dispatch.** It's gone from all five repos since the 2026-06-09 single-env collapse. Tag = release.
 - **Don't copy the reusable workflow into a new repo.** `uses:` it. Drift is the whole problem we're solving.
-- **Don't infer dev/prod split for new repos.** Check the workflow file. job-tracker, makeacompany-ai, and grantfoster.dev are single-env.
+- **Don't assume a dev step exists.** All five active repos are single-env: tag push writes straight to `-prod` (or the only env). No dev rancher-admin bundles exist anymore.
 
 ## Migration status
 
