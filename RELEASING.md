@@ -98,13 +98,14 @@ gh pr merge <pr> --admin --squash --delete-branch  # if you need it merged now
 
 Never `kubectl edit` the cluster directly — Fleet reconciles from `rancher-admin/master` and will revert your edit within ~30s.
 
-## Auto-merge — flaky, treat as best-effort
+## Auto-merge — armed + admin-merge with base-race retry
 
-Per learned lessons (`feedback_gitops_release_workflow`), `gh pr merge --auto --squash` arms the PR but doesn't always stick — race conditions with required status checks, self-approval blocks, and inconsistent branch-protection rules all play in. The reusable workflow arms it and exits 0 regardless.
+Per learned lessons (`feedback_gitops_release_workflow`), `gh pr merge --auto --squash` arms the PR but doesn't always stick — race conditions with required status checks, self-approval blocks, and inconsistent branch-protection rules all play in. The reusable workflow arms it, then calls `gh pr merge --admin --squash --delete-branch` and retries up to 3 times on base-race (`Base branch was modified` from the GraphQL API, or `mergeStateStatus: BEHIND`), running `gh pr update-branch` between attempts. Other failure modes (required check failed, branch-protection denial) exit the job non-zero immediately so they're not silently swallowed.
 
-If the PR is still open after the workflow finishes:
+If the PR is still open after the workflow finishes (i.e. all three attempts hit base-race, or the job exited on a non-race failure):
 
 ```bash
+gh pr update-branch <pr>                          # rebase onto current master
 gh pr merge <pr> --squash --delete-branch         # try first
 gh pr merge <pr> --admin --squash --delete-branch # if approval rule blocks
 ```
