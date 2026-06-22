@@ -261,35 +261,44 @@ jobs:
           echo "number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
           echo "url=${PR_URL}" >> "${GITHUB_OUTPUT}"
 
-          gh pr merge "${PR_NUMBER}" --auto --squash --delete-branch || \
-            echo "::warning::Could not enable auto-merge on PR #${PR_NUMBER}."
+          # Enable auto-merge as a fast path — fires immediately given master's
+          # ruleset requires a PR but 0 approvals and no required status checks —
+          # then poll-and-admin-merge to ride out GitHub's mergeability-
+          # computation race (the window where `--auto`/`--admin` see an UNKNOWN
+          # state and bounce). NEVER fail the release job on the merge: the PR is
+          # the deliverable, and the warning carries the one-line operator
+          # fallback. (Previously a single non-"base behind" hiccup exit-1'd the
+          # whole release, and only ~15s of runway left release PRs open.)
+          gh pr merge "${PR_NUMBER}" --auto --squash --delete-branch \
+            || echo "::warning::Could not enable auto-merge on PR #${PR_NUMBER}; will retry a direct merge."
 
+          merged=false
           attempt=1
-          max_attempts=3
+          max_attempts=8
           while [ "${attempt}" -le "${max_attempts}" ]; do
-            if err=$(gh pr merge "${PR_NUMBER}" --admin --squash --delete-branch 2>&1); then
-              echo "Admin-merged PR #${PR_NUMBER} on attempt ${attempt}."
-              break
-            fi
-            echo "${err}"
             state=$(gh pr view "${PR_NUMBER}" --json state --jq '.state' 2>/dev/null || echo "")
-            if [ "${state}" = "MERGED" ] || [ "${state}" = "CLOSED" ]; then
-              echo "PR #${PR_NUMBER} already ${state}."
+            if [ "${state}" = "MERGED" ]; then
+              merged=true; break
+            fi
+            if [ "${state}" = "CLOSED" ]; then
+              echo "PR #${PR_NUMBER} is CLOSED; not merging."
               break
             fi
-            if ! echo "${err}" | grep -qi "Base branch was modified"; then
-              merge_state=$(gh pr view "${PR_NUMBER}" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "")
-              if [ "${merge_state}" != "BEHIND" ]; then
-                echo "::error::Admin-merge of PR #${PR_NUMBER} failed for a non-base-race reason (mergeStateStatus=${merge_state}). Refusing to retry."
-                exit 1
-              fi
+            if err=$(gh pr merge "${PR_NUMBER}" --admin --squash --delete-branch 2>&1); then
+              echo "Admin-merged PR #${PR_NUMBER} on attempt ${attempt}/${max_attempts}."
+              merged=true; break
             fi
-            if [ "${attempt}" -eq "${max_attempts}" ]; then
-              echo "::error::Admin-merge of PR #${PR_NUMBER} still racing after ${max_attempts} attempts. Operator: gh pr update-branch ${PR_NUMBER} && gh pr merge ${PR_NUMBER} --admin --squash --delete-branch"
-              exit 1
+            echo "attempt ${attempt}/${max_attempts}: ${err}"
+            # If the base moved under us, fast-forward the PR branch; otherwise
+            # the failure is almost always the transient mergeability race —
+            # either way, wait and retry rather than failing the release.
+            if echo "${err}" | grep -qi "Base branch was modified"; then
+              gh pr update-branch "${PR_NUMBER}" >/dev/null 2>&1 || true
             fi
-            echo "::warning::Base branch moved under PR #${PR_NUMBER} (attempt ${attempt}/${max_attempts}); updating branch and retrying."
-            gh pr update-branch "${PR_NUMBER}" || true
-            sleep 5
+            sleep 8
             attempt=$((attempt + 1))
           done
+
+          if [ "${merged}" != "true" ]; then
+            echo "::warning::PR #${PR_NUMBER} did not auto-merge after ${max_attempts} attempts. Operator fallback: gh pr update-branch ${PR_NUMBER} && gh pr merge ${PR_NUMBER} --admin --squash --delete-branch"
+          fi
